@@ -117,7 +117,7 @@ class ScannerService : Service() {
     private fun startScan() {
         if (scanning) return
         val scanner = scanner ?: return
-        Log.i(TAG, "Starting scanner for service $SERVICE_UUID for ${SCANNING_TIME_MS}ms")
+        Log.d(TAG, "Starting scanner for service $SERVICE_UUID for ${SCANNING_TIME_MS}ms")
         seenAdvertisements = 0
         wakeLock.acquire()
         scanner.startScan(
@@ -136,7 +136,7 @@ class ScannerService : Service() {
     @Synchronized
     private fun stopScan() {
         if (!scanning) return
-        Log.i(TAG, "Stopping scanner for service $SERVICE_UUID, had seen $seenAdvertisements advertisements")
+        Log.d(TAG, "Stopping scanner for service $SERVICE_UUID, had seen $seenAdvertisements advertisements")
         handler.removeCallbacks(stopLaterRunnable)
         scanning = false
         scanner?.stopScan(callback)

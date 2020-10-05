@@ -130,7 +130,7 @@ class ExposureNotificationServiceImpl(private val context: Context, private val 
             .build()
 
     private fun storeDiagnosisKeyExport(token: String, export: TemporaryExposureKeyExport): Int = ExposureDatabase.with(context) { database ->
-        Log.d(TAG, "Importing keys from file ${export.start_timestamp?.let { Date(it * 1000) }} to ${export.end_timestamp?.let { Date(it * 1000) }}")
+        Log.i(TAG, "Importing keys from file ${export.start_timestamp?.let { Date(it * 1000) }} to ${export.end_timestamp?.let { Date(it * 1000) }}")
         database.batchStoreDiagnosisKey(packageName, token, export.keys.map { it.toKey() })
         database.batchUpdateDiagnosisKey(packageName, token, export.revised_keys.map { it.toKey() })
         export.keys.size + export.revised_keys.size
@@ -180,7 +180,7 @@ class ExposureNotificationServiceImpl(private val context: Context, private val 
                     }
                 }
                 val time = (System.currentTimeMillis() - start).toDouble() / 1000.0
-                Log.d(TAG, "$packageName/${params.token} provided $keys keys in ${time}s -> ${(keys.toDouble() / time * 1000).roundToInt().toDouble() / 1000.0} keys/s")
+                Log.i(TAG, "$packageName/${params.token} provided $keys keys in ${time}s -> ${(keys.toDouble() / time * 1000).roundToInt().toDouble() / 1000.0} keys/s")
 
                 database.noteAppAction(packageName, "provideDiagnosisKeys", JSONObject().apply {
                     put("request_token", params.token)
@@ -236,7 +236,9 @@ class ExposureNotificationServiceImpl(private val context: Context, private val 
                 ))
                 .setSummationRiskScore(exposures.map { it.getRiskScore(configuration) }.sum())
                 .build()
-
+        
+        Log.i(TAG, "$packageName/${params.token} matched ${response.matchedKeyCount} keys with maximum risk ${response.matchedKeyCount} ${response.daysSinceLastExposure} days ago")
+        
         database.noteAppAction(packageName, "getExposureSummary", JSONObject().apply {
             put("request_token", params.token)
             put("response_days_since", response.daysSinceLastExposure)
