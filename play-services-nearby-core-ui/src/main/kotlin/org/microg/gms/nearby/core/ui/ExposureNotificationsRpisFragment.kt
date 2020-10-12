@@ -3,18 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package org.microg.gms.ui
+package org.microg.gms.nearby.core.ui
 
 import android.annotation.TargetApi
-import android.icu.text.DateFormat.getDateInstance
 import android.os.Bundle
 import android.text.format.DateFormat
-import android.text.format.DateUtils
 import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceFragmentCompat
 import com.db.williamchart.data.Scale
-import com.google.android.gms.R
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.microg.gms.nearby.exposurenotification.ExposureDatabase
@@ -72,7 +69,7 @@ class ExposureNotificationsRpisFragment : PreferenceFragmentCompat() {
             }
             histogramCategory.title = getString(R.string.prefcat_exposure_rpis_histogram_title, totalRpiCount)
             histogram.labelsFormatter = { it.roundToInt().toString() }
-            histogram.scale = Scale(0f, rpiHistogram.values.max() ?: 0f)
+            histogram.scale = Scale(0f, rpiHistogram.values.max()?.coerceAtLeast(0.1f) ?: 0.1f)
             histogram.data = rpiHistogram
         }
     }

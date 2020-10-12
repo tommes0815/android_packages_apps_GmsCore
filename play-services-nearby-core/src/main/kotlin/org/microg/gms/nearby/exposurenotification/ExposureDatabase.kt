@@ -85,22 +85,30 @@ class ExposureDatabase private constructor(private val context: Context) : SQLit
                 it.executeUpdateDelete()
             }
 
-    fun dailyCleanup() = writableDatabase.run {
+    fun dailyCleanup(): Boolean = writableDatabase.run {
+        val start = System.currentTimeMillis()
         val rollingStartTime = currentRollingStartNumber * ROLLING_WINDOW_LENGTH * 1000 - TimeUnit.DAYS.toMillis(KEEP_DAYS.toLong())
         val advertisements = delete(TABLE_ADVERTISEMENTS, "timestamp < ?", longArrayOf(rollingStartTime))
         Log.d(TAG, "Deleted on daily cleanup: $advertisements adv")
+        if (start + MAX_DELETE_TIME < System.currentTimeMillis()) return@run false
         val appLogEntries = delete(TABLE_APP_LOG, "timestamp < ?", longArrayOf(rollingStartTime))
         Log.d(TAG, "Deleted on daily cleanup: $appLogEntries applogs")
+        if (start + MAX_DELETE_TIME < System.currentTimeMillis()) return@run false
         val temporaryExposureKeys = delete(TABLE_TEK, "(rollingStartNumber + rollingPeriod) < ?", longArrayOf(rollingStartTime / ROLLING_WINDOW_LENGTH_MS))
         Log.d(TAG, "Deleted on daily cleanup: $temporaryExposureKeys teks")
+        if (start + MAX_DELETE_TIME < System.currentTimeMillis()) return@run false
         val singleCheckedTemporaryExposureKeys = delete(TABLE_TEK_CHECK_SINGLE, "rollingStartNumber < ?", longArrayOf(rollingStartTime / ROLLING_WINDOW_LENGTH_MS - ROLLING_PERIOD))
         Log.d(TAG, "Deleted on daily cleanup: $singleCheckedTemporaryExposureKeys tcss")
+        if (start + MAX_DELETE_TIME < System.currentTimeMillis()) return@run false
         val fileCheckedTemporaryExposureKeys = delete(TABLE_TEK_CHECK_FILE, "endTimestamp < ?", longArrayOf(rollingStartTime))
         Log.d(TAG, "Deleted on daily cleanup: $fileCheckedTemporaryExposureKeys tcfs")
+        if (start + MAX_DELETE_TIME < System.currentTimeMillis()) return@run false
         val appPerms = delete(TABLE_APP_PERMS, "timestamp < ?", longArrayOf(System.currentTimeMillis() - CONFIRM_PERMISSION_VALIDITY))
         Log.d(TAG, "Deleted on daily cleanup: $appPerms perms")
+        if (start + MAX_DELETE_TIME < System.currentTimeMillis()) return@run false
         execSQL("VACUUM;")
         Log.d(TAG, "Done vacuuming")
+        return@run true
     }
 
     fun grantPermission(packageName: String, signatureDigest: String, permission: String, timestamp: Long = System.currentTimeMillis()) = writableDatabase.run {
@@ -205,7 +213,7 @@ class ExposureDatabase private constructor(private val context: Context) : SQLit
     }
 
     fun batchStoreSingleDiagnosisKey(tid: Long, keys: List<TemporaryExposureKey>, database: SQLiteDatabase = writableDatabase) = database.run {
-        beginTransaction()
+        beginTransactionNonExclusive()
         try {
             keys.forEach { storeSingleDiagnosisKey(tid, it, database) }
             setTransactionSuccessful()
@@ -339,7 +347,7 @@ class ExposureDatabase private constructor(private val context: Context) : SQLit
         val keys = listSingleDiagnosisKeysPendingSearch(tid, database)
         val oldestRpi = oldestRpi
         for (key in keys) {
-            if ((key.rollingStartIntervalNumber + key.rollingPeriod) * ROLLING_WINDOW_LENGTH_MS + ALLOWED_KEY_OFFSET_MS < oldestRpi) {
+            if ((key.rollingStartIntervalNumber + key.rollingPeriod).toLong() * ROLLING_WINDOW_LENGTH_MS + ALLOWED_KEY_OFFSET_MS < oldestRpi) {
                 // Early ignore because key is older than since we started scanning.
                 applySingleDiagnosisKeySearchResult(key, false, database)
             } else {
@@ -356,7 +364,7 @@ class ExposureDatabase private constructor(private val context: Context) : SQLit
     }
 
     fun finishFileMatching(tid: Long, hash: ByteArray, endTimestamp: Long, keys: List<TemporaryExposureKey>, updates: List<TemporaryExposureKey>, database: SQLiteDatabase = writableDatabase) = database.run {
-        beginTransaction()
+        beginTransactionNonExclusive()
         try {
             insert(TABLE_TEK_CHECK_FILE, "NULL", ContentValues().apply {
                 put("hash", ByteString.of(*hash).hex())
@@ -367,29 +375,38 @@ class ExposureDatabase private constructor(private val context: Context) : SQLit
             val workQueue = LinkedBlockingQueue<Runnable>()
             val poolSize = Runtime.getRuntime().availableProcessors()
             val executor = ThreadPoolExecutor(poolSize, poolSize, 1, TimeUnit.SECONDS, workQueue)
-            val futures = arrayListOf<Future<*>>()
+            val futures = arrayListOf<Future<TemporaryExposureKey?>>()
             val oldestRpi = oldestRpi
             var ignored = 0
             var processed = 0
             var found = 0
+            var riskLogged = 0
             for (key in keys) {
-                if ((key.rollingStartIntervalNumber + key.rollingPeriod) * ROLLING_WINDOW_LENGTH_MS + ALLOWED_KEY_OFFSET_MS < oldestRpi) {
+                if (key.transmissionRiskLevel > riskLogged) {
+                    riskLogged = key.transmissionRiskLevel
+                    Log.d(TAG, "First key with risk ${key.transmissionRiskLevel}: ${ByteString.of(*key.keyData).hex()} starts ${key.rollingStartIntervalNumber}")
+                }
+                if ((key.rollingStartIntervalNumber + key.rollingPeriod).toLong() * ROLLING_WINDOW_LENGTH_MS + ALLOWED_KEY_OFFSET_MS < oldestRpi) {
                     // Early ignore because key is older than since we started scanning.
                     ignored++;
                 } else {
-                    futures.add(executor.submit {
-                        if (findMeasuredExposures(key).isNotEmpty()) {
-                            applyDiagnosisFileKeySearchResult(tcfid, key, this)
-                            found++;
-                        }
+                    futures.add(executor.submit(Callable {
                         processed++
-                    })
+                        if (findMeasuredExposures(key).isNotEmpty()) {
+                            key
+                        } else {
+                            null
+                        }
+                    }))
                 }
             }
             for (future in futures) {
-                future.get()
+                future.get()?.let {
+                    applyDiagnosisFileKeySearchResult(tcfid, it, this)
+                    found++
+                }
             }
-            Log.d(TAG,  "Processed $processed keys, found $found matches, ignored $ignored keys that are older than our scanning efforts ($oldestRpi)")
+            Log.d(TAG, "Processed $processed keys, found $found matches, ignored $ignored keys that are older than our scanning efforts ($oldestRpi)")
             executor.shutdown()
             for (update in updates) {
                 val matched = compileStatement("SELECT COUNT(tcsid) FROM $TABLE_TEK_CHECK_FILE_MATCH WHERE keyData = ? AND rollingStartNumber = ? AND rollingPeriod = ?").use {
@@ -585,7 +602,7 @@ class ExposureDatabase private constructor(private val context: Context) : SQLit
         get() = readableDatabase.run {
             query(TABLE_ADVERTISEMENTS, arrayOf("MIN(timestamp)"), null, null, null, null, null).use { cursor ->
                 if (cursor.moveToNext()) {
-                    cursor.getLong(0)
+                    cursor.getLong(0).let { if (it == 0L) System.currentTimeMillis() else it }
                 } else {
                     System.currentTimeMillis()
                 }
@@ -634,7 +651,7 @@ class ExposureDatabase private constructor(private val context: Context) : SQLit
     }
 
     private fun ensureTemporaryExposureKey(): TemporaryExposureKey = writableDatabase.let { database ->
-        database.beginTransaction()
+        database.beginTransactionNonExclusive()
         try {
             var key = findOwnKeyAt(currentRollingStartNumber.toInt(), database)
             if (key == null) {
@@ -688,6 +705,7 @@ class ExposureDatabase private constructor(private val context: Context) : SQLit
     companion object {
         private const val DB_NAME = "exposure.db"
         private const val DB_VERSION = 5
+        private const val MAX_DELETE_TIME = 5000L
         private const val TABLE_ADVERTISEMENTS = "advertisements"
         private const val TABLE_APP_LOG = "app_log"
         private const val TABLE_TEK = "tek"
